@@ -1,0 +1,5 @@
+kaggle k list -m --sort-by dateRun
+jupyter lab --ip 0.0.0.0 --port 8181 --no-browser
+sudo umount /dev/shm/ && sudo mount -t tmpfs -o rw,nosuid,nodev,noexec,relatime,size=80G shm /dev/shm
+watch -d -n 0.5 nvidia-smi
+(64 * 0.00698) + (240 * 0.00094) + (.74 * 8) + (.17 * 400 / 730)
