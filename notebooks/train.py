@@ -65,7 +65,6 @@ warnings.filterwarnings('ignore')
 
 # In[3]:
 
-IMAGE_SIZE = '512'
 # Human Protein Atlas Competetion Dataset
 DATA_DIR = Path('../input/human-protein-atlas-image-classification/')
 TRAIN_DIR = DATA_DIR / 'train' # Path(f'../input/train_{IMAGE_SIZE}') # 
@@ -95,17 +94,18 @@ hpa_df = pd.read_csv('../HPAv18RBGY_wodpl.csv')
 #    ../input/bestmodel/best_model_195.pth
 #    Or use previous kernel output:
 #    ../input/inceptionv3-attention-wip/model.pth
-CHECKPOINT_PATH = Path('dw_all_sizes-best_model-5.pth')
+CHECKPOINT_PATH = Path('dw_please_work-best_model-2.pth')
 print('Model path exists', CHECKPOINT_PATH.exists())
 
 # Set these three to False to quick commit so updates can be branched
 # to new kernels to run different parameters simultaneously
 SUBMISSION_RUN = True 
 TRAIN = True 
-LOAD_CHECKPOINT = True 
+LOAD_CHECKPOINT = False 
+ADD_HPA = True 
 
 N_EPOCHS = 25 
-BATCH_SIZE = 32 * 8
+BATCH_SIZE = 32 * 4
 LEARNING_RATE = 1e-3
 SIGMOID_THRESHOLD = 0.5
 VALIDATION_SIZE = .20
@@ -113,7 +113,7 @@ VISDOM_ENV_NAME = 'dw_please_work'
 
 ADAPTIVE_POOLING = True
 PINNED = True  # test_dl is always False for now
-NUM_WORKERS = 96 
+NUM_WORKERS = 36 
 # In[4]:
 
 
@@ -290,18 +290,7 @@ class ProteinDataset(Dataset):
         else:
             if is_additional_hpa:
                 image_paths = [HPA_DIR / f'{id_}_{c}.png' for c in self.colors]
-                r, g, b, y = map(self.mp_load, image_paths)
-                try:
-                    rgb = np.stack([
-                        r[:, :, 0],# // 2 + y // 2,
-                        g[:, :, 1],# // 2 + y // 2,
-                        b[:, :, 2],# // 2
-                        #y[:, :, 1],
-                    ], axis=2)
-                except:
-                    print(image_paths)
-                    rgb = g
-                #rgb = np.array(Image.open(HPA_DIR / f'{id_}.png'), np.uint8)
+                rgb = np.array(Image.open(HPA_DIR / f'{id_}.png'), np.uint8)
             else:
                 image_paths = [self._dir / f'{id_}_{c}.png' for c in self.colors]
                 r, g, b, y = map(self.mp_load, image_paths)
@@ -396,8 +385,8 @@ print(len(train_split))
 
 # In[15]:
 
-
-train_split = train_split.append(hpa_df) # selection_df)
+if ADD_HPA:
+    train_split = train_split.append(hpa_df) # selection_df)
 
 
 # In[16]:
@@ -802,29 +791,29 @@ class MyResNet(torchvision.models.ResNet):
 
 # Download pretrained InceptionV3. transform_input is image normalization, which
 # we have already done
-model = torchvision.models.resnet34(pretrained=True)
+#model = torchvision.models.resnet34(pretrained=True)
 #w = model.conv1.weight
 #model.conv1 = nn.Conv2d(4, 64, kernel_size=7, stride=2, padding=3, bias=False)
 #model.conv1.weight = nn.Parameter(torch.cat((w, 0.5 * (w[:, :1, :, :] + w[:, 2:, :, :])), dim=1))
 #model = torchvision.models.resnet50(pretrained=True)
-model.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-model.fc = nn.Linear(512, 28)
+#model.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+#model.fc = nn.Linear(512, 28)
 #model.fc = nn.Linear(2048, 28)
 
-#if ADAPTIVE_POOLING:
-#    pretrained = torchvision.models.inception_v3(pretrained=True, transform_input=False)
-#    model = Inception3Adaptive(transform_input=False)
-#    model.load_state_dict(pretrained.state_dict())
-#    #model.Conv2d_1a_3x3 = BasicConv2d(4, 32, kernel_size=3, stride=2)
-#    #model.Conv2d_1a_3x3.conv.weight = 
-#    #model.Conv2d_1a_3x3.bn = 
-#    model.fc = nn.Linear(2048, 28)
-#    torch.nn.init.xavier_uniform_(model.fc.weight)
-#    model.aux_logits = False
-#else:
-#    model = torchvision.models.inception_v3(pretrained=True, transform_input=False)
-#    model.fc = nn.Linear(2048, 28)
-#    model.aux_logits = False
+if ADAPTIVE_POOLING:
+    pretrained = torchvision.models.inception_v3(pretrained=True, transform_input=False)
+    model = Inception3Adaptive(transform_input=False)
+    model.load_state_dict(pretrained.state_dict())
+    #model.Conv2d_1a_3x3 = BasicConv2d(4, 32, kernel_size=3, stride=2)
+    #model.Conv2d_1a_3x3.conv.weight = 
+    #model.Conv2d_1a_3x3.bn = 
+    model.fc = nn.Linear(2048, 28)
+    torch.nn.init.xavier_uniform_(model.fc.weight)
+    model.aux_logits = False
+else:
+    model = torchvision.models.inception_v3(pretrained=True, transform_input=False)
+    model.fc = nn.Linear(2048, 28)
+    model.aux_logits = False
 
 # Replace 1000 output layer with 28 output layer for labels
 
@@ -854,9 +843,9 @@ if TRAIN:
     #four = [{'params': p, 'lr': 1e-2} for n, p in model.named_parameters() if n.startswith('layer4')]
     #fc = [{'params': p, 'lr': 1e-2} for n, p in model.named_parameters() if n.startswith('fc')]
 
-    first = [{'params': p, 'lr': 1e-4} for n, p in model.module.named_parameters() if n.startswith('Conv2d')]
-    middle = [{'params': p, 'lr': 1e-3} for n, p in model.module.named_parameters() if n[:7] in ['Mixed_5', 'Mixed_6', 'Mixed_7', 'AuxLogi']]
-    last = [{'params': p, 'lr': 1e-2} for n, p in model.module.named_parameters() if n.startswith('fc')]
+    first = [{'params': p, 'lr': 1e-4} for n, p in model.named_parameters() if n.startswith('Conv2d')]
+    middle = [{'params': p, 'lr': 1e-3} for n, p in model.named_parameters() if n[:7] in ['Mixed_5', 'Mixed_6', 'Mixed_7', 'AuxLogi']]
+    last = [{'params': p, 'lr': 1e-2} for n, p in model.named_parameters() if n.startswith('fc')]
     optim_params = first + middle + last
     #optim_params = beginning + one + two + three + four + fc
     optimizer = AdamW(params=optim_params, lr=LEARNING_RATE, weight_decay=1e-5)
