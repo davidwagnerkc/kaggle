@@ -10,7 +10,6 @@
 
 
 # In[2]:
-
 import copy
 import itertools
 import time
@@ -29,6 +28,8 @@ import torch.nn.functional as F
 from torch.utils.data.dataset import Dataset
 from torch.utils.data.dataloader import DataLoader
 from torch.optim import Optimizer
+
+import albumentations as alb 
 
 import math
 import torchvision
@@ -94,14 +95,14 @@ hpa_df = pd.read_csv('../HPAv18RBGY_wodpl.csv')
 #    ../input/bestmodel/best_model_195.pth
 #    Or use previous kernel output:
 #    ../input/inceptionv3-attention-wip/model.pth
-CHECKPOINT_PATH = Path('dw_please_work-best_model-2.pth')
+CHECKPOINT_PATH = Path('dw_alb_512-best_model-17.pth')
 print('Model path exists', CHECKPOINT_PATH.exists())
 
 # Set these three to False to quick commit so updates can be branched
 # to new kernels to run different parameters simultaneously
 SUBMISSION_RUN = True 
-TRAIN = True 
-LOAD_CHECKPOINT = False 
+TRAIN = False 
+LOAD_CHECKPOINT = True 
 ADD_HPA = True 
 
 N_EPOCHS = 25 
@@ -109,11 +110,11 @@ BATCH_SIZE = 32 * 4
 LEARNING_RATE = 1e-3
 SIGMOID_THRESHOLD = 0.5
 VALIDATION_SIZE = .20
-VISDOM_ENV_NAME = 'dw_please_work'
+VISDOM_ENV_NAME = 'dw_alb_512'
 
 ADAPTIVE_POOLING = True
 PINNED = True  # test_dl is always False for now
-NUM_WORKERS = 36 
+NUM_WORKERS = 32 
 # In[4]:
 
 
@@ -172,52 +173,30 @@ LABEL_NAMES = list(LABELS.values())
 
 # In[7]:
 
-sometimes = lambda aug: iaa.Sometimes(0.5, aug)
+def strong_aug(p=1):
+    return alb.Compose([
+        alb.IAAAdditiveGaussianNoise(p=0.2),
+        alb.OneOf([
+            alb.MotionBlur(p=.2),
+            alb.MedianBlur(blur_limit=3, p=.1),
+            alb.Blur(blur_limit=3, p=.1),
+        ], p=0.2),
+        #ShiftScaleRotate(shift_limit=0.0625, scale_limit=0.2, rotate_limit=45, p=.2),
+        alb.OneOf([
+            alb.OpticalDistortion(p=0.3),
+            alb.GridDistortion(p=.1),
+            alb.ElasticTransform(p=0.3),
+        ], p=0.2),
+        alb.OneOf([
+            alb.IAASharpen(),
+            alb.IAAEmboss(),
+            alb.RandomContrast(),
+            alb.RandomBrightness(),
+        ], p=0.3),
+    ], p=p)
 
-seq = iaa.Sequential(
-    [
-        sometimes(iaa.CropAndPad(
-            percent=(-0.05, 0.1),
-            pad_mode=ia.ALL,
-            pad_cval=(0, 255)
-        )),
-        iaa.SomeOf((0, 5),
-            [
-                sometimes(iaa.Superpixels(p_replace=(0, 1.0), n_segments=(20, 200))),
-                iaa.OneOf([
-                    iaa.GaussianBlur((0, 3.0)),
-                    iaa.AverageBlur(k=(2, 7)),
-                    iaa.MedianBlur(k=(3, 11)),
-                ]),
-                iaa.Sharpen(alpha=(0, 1.0), lightness=(0.75, 1.5)),
-                iaa.Emboss(alpha=(0, 1.0), strength=(0, 2.0)),
-                iaa.SimplexNoiseAlpha(iaa.OneOf([
-                    iaa.EdgeDetect(alpha=(0.5, 1.0)),
-                    iaa.DirectedEdgeDetect(alpha=(0.5, 1.0), direction=(0.0, 1.0)),
-                ])),
-                iaa.AdditiveGaussianNoise(loc=0, scale=(0.0, 0.05*255), per_channel=0.5),
-                iaa.OneOf([
-                    iaa.Dropout((0.01, 0.1), per_channel=0.5),
-                    iaa.CoarseDropout((0.03, 0.15), size_percent=(0.02, 0.05), per_channel=0.2),
-                ]),
-                iaa.Add((-10, 10), per_channel=0.5),
-                iaa.OneOf([
-                    iaa.Multiply((0.5, 1.5), per_channel=0.5),
-                    iaa.FrequencyNoiseAlpha(
-                        exponent=(-4, 0),
-                        first=iaa.Multiply((0.5, 1.5), per_channel=True),
-                        second=iaa.ContrastNormalization((0.5, 2.0))
-                    )
-                ]),
-                iaa.ContrastNormalization((0.5, 2.0), per_channel=0.5),
-            ],
-            random_order=True
-        )
-    ],
-    random_order=True
-)
-
-
+def augment_wrap(aug, image):
+    return aug(image=image)['image']
 
 class ProteinDataset(Dataset):
     def __init__(self, df, images_dir, transform=None, train=True, device='cpu', preproc=True):            
@@ -250,8 +229,8 @@ class ProteinDataset(Dataset):
         return len(self.df)
     
     def mp_load(self, path):
-        pil_im = Image.open(path)
-        return np.array(pil_im, np.uint8)
+        with Image.open(path) as pil_im:
+            return np.array(pil_im, np.uint8)
                                       
     def __getitem__(self, key):
         """
@@ -293,14 +272,20 @@ class ProteinDataset(Dataset):
                 rgb = np.array(Image.open(HPA_DIR / f'{id_}.png'), np.uint8)
             else:
                 image_paths = [self._dir / f'{id_}_{c}.png' for c in self.colors]
-                r, g, b, y = map(self.mp_load, image_paths)
-                rgb = np.stack([
-                    r,# // 2 + y // 2,
-                    g,# // 2 + y // 2,
-                    b,# // 2
-                    #y,
-                ], axis=2)
-            #rgb = seq.augment_image(rgb)
+                try:
+                    r, g, b, y = map(self.mp_load, image_paths)
+                    rgb = np.stack([
+                        r,# // 2 + y // 2,
+                        g,# // 2 + y // 2,
+                        b,# // 2
+                        #y,
+                    ], axis=2)
+                except Exception as e:
+                    print(e)
+                    print(image_paths)
+                    rgb = r
+            aug = strong_aug(p=1)
+            rgb = augment_wrap(aug, rgb)
             X = self.transform(rgb)
 
         y = []
@@ -474,6 +459,8 @@ train_split = train_split.reset_index(drop=True)
 
 labels, counts = np.unique(list(map(int, itertools.chain(*train_split.Target.str.split()))), return_counts=True)
 weights = 1. / torch.tensor(counts, dtype=torch.float, device=device)
+
+print(weights)
 
 # In[25]:
 
@@ -785,6 +772,25 @@ class MyResNet(torchvision.models.ResNet):
 
         return x
 
+class FocalLoss(nn.Module):
+    def __init__(self, gamma=2):
+        super().__init__()
+        self.gamma = gamma
+        
+    def forward(self, input, target):
+        if not (target.size() == input.size()):
+            raise ValueError("Target size ({}) must be the same as input size ({})"
+                             .format(target.size(), input.size()))
+
+        max_val = (-input).clamp(min=0)
+        loss = input - input * target + max_val + \
+            ((-max_val).exp() + (-input - max_val).exp()).log()
+
+        invprobs = F.logsigmoid(-input * (target * 2.0 - 1.0))
+        loss = (invprobs * self.gamma).exp() * loss
+        
+        return loss.sum(dim=1).mean()
+
 
 # In[70]:
 
@@ -835,6 +841,7 @@ if TRAIN:
         param.requires_grad = True 
 
     criterion = nn.BCEWithLogitsLoss().cuda()
+    #criterion = FocalLoss().cuda()
     
     #beginning = [{'params': p, 'lr': 1e-5} for n, p in list(model.named_parameters())[:3]]
     #one = [{'params': p, 'lr': 1e-4} for n, p in model.named_parameters() if n.startswith('layer1')]
@@ -843,9 +850,9 @@ if TRAIN:
     #four = [{'params': p, 'lr': 1e-2} for n, p in model.named_parameters() if n.startswith('layer4')]
     #fc = [{'params': p, 'lr': 1e-2} for n, p in model.named_parameters() if n.startswith('fc')]
 
-    first = [{'params': p, 'lr': 1e-4} for n, p in model.named_parameters() if n.startswith('Conv2d')]
-    middle = [{'params': p, 'lr': 1e-3} for n, p in model.named_parameters() if n[:7] in ['Mixed_5', 'Mixed_6', 'Mixed_7', 'AuxLogi']]
-    last = [{'params': p, 'lr': 1e-2} for n, p in model.named_parameters() if n.startswith('fc')]
+    first = [{'params': p, 'lr': 1e-4} for n, p in model.module.named_parameters() if n.startswith('Conv2d')]
+    middle = [{'params': p, 'lr': 1e-3} for n, p in model.module.named_parameters() if n[:7] in ['Mixed_5', 'Mixed_6', 'Mixed_7', 'AuxLogi']]
+    last = [{'params': p, 'lr': 1e-2} for n, p in model.module.named_parameters() if n.startswith('fc')]
     optim_params = first + middle + last
     #optim_params = beginning + one + two + three + four + fc
     optimizer = AdamW(params=optim_params, lr=LEARNING_RATE, weight_decay=1e-5)
@@ -1261,7 +1268,7 @@ if SUBMISSION_RUN:
 
 
 if SUBMISSION_RUN:
-    for t in [.075, .125, .1, .3, .4, .5]:
+    for t in [.1, .2, .3, .4, .5]:
         submission = test_df[['Id', 'Predicted']].copy()
         Predicted = []
         for i, prediction in enumerate(test_ds.mlb.inverse_transform(y_predictions > t)):
@@ -1275,7 +1282,7 @@ if SUBMISSION_RUN:
         submission['Predicted'] = Predicted
 
         submission.to_csv(f'protein_classification{str(t * 10)}.csv', index=False)
-
+        #submission.to_csv(f'special.csv', index=False)
 
 # In[ ]:
 
