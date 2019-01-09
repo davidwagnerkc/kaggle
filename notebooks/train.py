@@ -58,8 +58,8 @@ test_df = pd.read_csv(DATA_DIR / 'sample_submission.csv')
 HPA_DIR = Path('../input/HPAv18/')
 hpa_df = pd.read_csv('../HPAv18RBGY_wodpl.csv')
 
-#CHECKPOINT_PATH = Path('inceptionv3_512_nog_acc32x4_7norm-best_model-21.pth')
-CHECKPOINT_PATH = Path('dw_299_res18_nog3-14-aug-best_model-28.pth')
+CHECKPOINT_PATH = Path('inceptionv3_512_nog_acc32x4_7norm-best_model-21.pth')
+#CHECKPOINT_PATH = Path('dw_299_res18_nog3-14-aug-best_model-28.pth')
 
 LOAD_CHECKPOINT = True 
 
@@ -69,17 +69,17 @@ ADD_HPA = True
 ONLY_VAL = True
 SUBMISSION_RUN = True 
 TTA = True
-VAL_TTA = True
+VAL_TTA = 8 
 
-ARCH = 'resnet18' # 'inceptionv3'
+#ARCH = 'resnet18'
+ARCH = 'inceptionv3'
 N_EPOCHS = 25 
-BATCH_SIZE = 32 * 8
+BATCH_SIZE = 32 * 4
 LEARNING_RATE = 1e-3
 SIGMOID_THRESHOLD = 0.5
 VALIDATION_SIZE = .20
 VISDOM_ENV_NAME = 'inceptionv3_512_nog_acc32x4_7norm'
 
-ADAPTIVE_POOLING = True
 NUM_WORKERS = mp.cpu_count() 
 
 vis = visdom.Visdom(env=VISDOM_ENV_NAME, server='http://3.17.85.107')
@@ -157,9 +157,11 @@ class ProteinDataset(Dataset):
                 g,
                 b,
             ], axis=2)
-        aug = alb.ShiftScaleRotate(shift_limit=0, scale_limit=(0, .25), rotate_limit=180, p=.5)
-        if self.train:
-            rgb = augment_wrap(aug, rgb)
+        if choice == 'shift':
+            aug = alb.ShiftScaleRotate(shift_limit=0, scale_limit=(0, .25), rotate_limit=180, p=1)
+            if self.train:
+                rgb = augment_wrap(aug, rgb)
+            choice = 0
         X = self.transform(rgb)
 
         y = []
@@ -176,7 +178,7 @@ class ProteinDataset(Dataset):
         if choice == 'random':
             choice = np.random.randint(8)
         if choice == 0:  # no rotation
-            x = np.rot90(x, k=0, axes=(1, 2)).copy()
+            x = x
         elif choice == 1:  # 90
             x = np.rot90(x, k=1, axes=(1, 2)).copy()
         elif choice == 2:  # 180
@@ -211,11 +213,11 @@ if VAL_TTA:
     val_split['choice'] = 0
     print(len(val_split))
     orig = val_split.copy()
-    for i in range(1, 8):
+    for i in range(1, VAL_TTA):
         tmp = orig.copy()
-        tmp['choice'] = i
+        tmp['choice'] = 'shift' #i
         val_split = val_split.append(tmp)
-val_split = val_split.append(val_split)
+#val_split['choice'] = 'shift'
 print(len(val_split))
 if ADD_HPA:
     train_split = train_split.append(hpa_df)
@@ -263,8 +265,7 @@ def plot_labels(df, ax):
 #fig, (ax1, ax2) = plt.subplots(nrows=2, ncols=1, dpi=200)
 # plot_labels(train_df, ax1)
 # plot_labels(train_split, ax2)
-
-transform = transforms.Compose([
+trans = [
     transforms.ToPILImage(),
     transforms.Resize((299, 299)),
     transforms.ToTensor(),
@@ -272,7 +273,10 @@ transform = transforms.Compose([
         mean=[0.485, 0.456, 0.406],
         std=[0.229, 0.224, 0.225]
     ),
-])
+]
+trans = trans if ARCH == 'resnet18' else trans[2:]
+transform = transforms.Compose(trans)
+print(transform)
 
 train_ds = ProteinDataset(
     train_split,
@@ -632,28 +636,45 @@ def train(dataloaders, model, criterion, optimizer, sigmoid_thresh, n_epochs):
                 if phase == 'train':
                     loss.backward()
                 
-                if (i + 1) % accumulation_steps == 0:
-                    if phase == 'train':
+                if (i + 1) % accumulation_steps == 0 and phase == 'train':
                         optimizer.step()
                         optimizer.zero_grad()
 
-                        stats.train_loss.update(loss.item(), n=X.shape[0])
-                        hold_y.append(y)
-                        hold_y_.append(y_)
-                    else:
-                        stats.val_loss.update(loss.item(), n=X.shape[0])
-                        hold_y.append(y)
-                        hold_y_.append(y_)
+                if phase == 'train':
+                    stats.train_loss.update(loss.item(), n=X.shape[0])
+                    hold_y.append(y)
+                    hold_y_.append(y_)
+                else:
+                    stats.val_loss.update(loss.item(), n=X.shape[0])
+                    hold_y.append(y)
+                    hold_y_.append(y_)
 
         f1, best_thresh = 0, 0
         top_5 = deque([], maxlen=5)
         hold_y = torch.cat(hold_y).cpu()
         hold_y_ = sigmoid(torch.cat(hold_y_)).cpu()
+        if VAL_TTA:
+            hold_y = hold_y.reshape((VAL_TTA, -1, 28)).mean(dim=0)
+            hold_y_ = hold_y_.reshape((VAL_TTA, -1, 28)).mean(dim=0)
+
         for thresh in np.linspace(0, 1, 100):
             score = f1_score(hold_y, hold_y_ > thresh, average='macro')
             if score > f1:
                 top_5.append((score, thresh))
                 f1, best_thresh = score, thresh
+        lb_thresh = torch.Tensor([
+            0.362397820,0.043841336,0.075268817,0.059322034,0.075268817,
+            0.075268817,0.043841336,0.075268817,0.010000000,0.010000000,
+            0.010000000,0.043841336,0.043841336,0.014198783,0.043841336,
+            0.010000000,0.028806584,0.014198783,0.028806584,0.059322034,
+            0.010000000,0.126126126,0.028806584,0.075268817,0.010000000,
+            0.222493880,0.028806584,0.010000000
+        ])
+        score = f1_score(hold_y, hold_y_ > lb_thresh, average='macro')
+        if score > f1:
+            top_5.append((score, 99))
+            f1, best_thresh = score, 99 
+
         for s, t in top_5:
             print(f'{s:.3f} - {t:.3f}')
 
