@@ -95,26 +95,27 @@ hpa_df = pd.read_csv('../HPAv18RBGY_wodpl.csv')
 #    ../input/bestmodel/best_model_195.pth
 #    Or use previous kernel output:
 #    ../input/inceptionv3-attention-wip/model.pth
-CHECKPOINT_PATH = Path('dw_alb_512-best_model-17.pth')
+CHECKPOINT_PATH = Path('inceptionv3_512_nog_acc32x4_7norm-best_model-21.pth')
 print('Model path exists', CHECKPOINT_PATH.exists())
 
 # Set these three to False to quick commit so updates can be branched
 # to new kernels to run different parameters simultaneously
 SUBMISSION_RUN = True 
+TTA = True
 TRAIN = False 
 LOAD_CHECKPOINT = True 
 ADD_HPA = True 
 
 N_EPOCHS = 25 
-BATCH_SIZE = 32 * 4
+BATCH_SIZE = 32 * 8
 LEARNING_RATE = 1e-3
 SIGMOID_THRESHOLD = 0.5
 VALIDATION_SIZE = .20
-VISDOM_ENV_NAME = 'dw_alb_512'
+VISDOM_ENV_NAME = 'inceptionv3_512_nog_acc32x4_7norm'
 
 ADAPTIVE_POOLING = True
 PINNED = True  # test_dl is always False for now
-NUM_WORKERS = 32 
+NUM_WORKERS = 64 
 # In[4]:
 
 
@@ -175,24 +176,24 @@ LABEL_NAMES = list(LABELS.values())
 
 def strong_aug(p=1):
     return alb.Compose([
-        alb.IAAAdditiveGaussianNoise(p=0.2),
+        alb.IAAAdditiveGaussianNoise(p=0.4),
         alb.OneOf([
-            alb.MotionBlur(p=.2),
-            alb.MedianBlur(blur_limit=3, p=.1),
-            alb.Blur(blur_limit=3, p=.1),
-        ], p=0.2),
+            alb.MotionBlur(p=.4),
+            alb.MedianBlur(blur_limit=3, p=.4),
+            alb.Blur(blur_limit=3, p=.4),
+        ], p=0.4),
         #ShiftScaleRotate(shift_limit=0.0625, scale_limit=0.2, rotate_limit=45, p=.2),
         alb.OneOf([
-            alb.OpticalDistortion(p=0.3),
-            alb.GridDistortion(p=.1),
-            alb.ElasticTransform(p=0.3),
-        ], p=0.2),
+            alb.OpticalDistortion(p=0.4),
+            alb.GridDistortion(p=.4),
+            alb.ElasticTransform(p=0.4),
+        ], p=0.4),
         alb.OneOf([
             alb.IAASharpen(),
             alb.IAAEmboss(),
             alb.RandomContrast(),
             alb.RandomBrightness(),
-        ], p=0.3),
+        ], p=0.4),
     ], p=p)
 
 def augment_wrap(aug, image):
@@ -284,9 +285,17 @@ class ProteinDataset(Dataset):
                     print(e)
                     print(image_paths)
                     rgb = r
-            aug = strong_aug(p=1)
-            rgb = augment_wrap(aug, rgb)
+            #aug = alb.ShiftScaleRotate(shift_limit=0.0625, scale_limit=0.2, rotate_limit=45, p=.75)
+            #if self.train:
+            #    #aug1 = alb.OneOf([
+            #    #    alb.OpticalDistortion(p=0.4),
+            #    #    alb.GridDistortion(p=.4),
+            #    #    alb.ElasticTransform(p=0.4),
+            #    #], p=1)
+            #    #aug = strong_aug(p=.5)
+            #    rgb = augment_wrap(aug, rgb)
             X = self.transform(rgb)
+
 
         y = []
         if 'Target' in self.df:
@@ -371,7 +380,8 @@ print(len(train_split))
 # In[15]:
 
 if ADD_HPA:
-    train_split = train_split.append(hpa_df) # selection_df)
+    # REMOVE
+    train_split = train_split.append(selection_df) # selection_df)
 
 
 # In[16]:
@@ -489,8 +499,8 @@ def plot_labels(df, ax):
 
 
 transform = transforms.Compose([
-#    transforms.ToPILImage(),
-#    transforms.Resize((512, 512)),  # (299, 299) InceptionV3 input
+    #transforms.ToPILImage(),
+    #transforms.Resize((299, 299)),  # (299, 299) InceptionV3 input
     transforms.ToTensor(),  # To Tensor dtype and convert [0, 255] uint8 to [0, 1] float
     transforms.Normalize(  # Standard image normalization
         mean=[0.485, 0.456, 0.406],
@@ -507,7 +517,7 @@ train_ds = ProteinDataset(
     preproc=False,
 
 )
-train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, pin_memory=PINNED, shuffle=True, num_workers=NUM_WORKERS)
+train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, pin_memory=PINNED, shuffle=True, num_workers=NUM_WORKERS, drop_last=True)
 
 val_ds = ProteinDataset(
     val_split,
@@ -525,7 +535,7 @@ test_ds = ProteinDataset(
     test_df,
     images_dir=TEST_DIR,
     transform=transform,
-    train=False,
+    train=TTA,
     device=device,
     preproc=False,
 )
@@ -797,13 +807,18 @@ class FocalLoss(nn.Module):
 
 # Download pretrained InceptionV3. transform_input is image normalization, which
 # we have already done
-#model = torchvision.models.resnet34(pretrained=True)
+#model = torchvision.models.resnet18(pretrained=True)
 #w = model.conv1.weight
 #model.conv1 = nn.Conv2d(4, 64, kernel_size=7, stride=2, padding=3, bias=False)
 #model.conv1.weight = nn.Parameter(torch.cat((w, 0.5 * (w[:, :1, :, :] + w[:, 2:, :, :])), dim=1))
 #model = torchvision.models.resnet50(pretrained=True)
 #model.avgpool = nn.AdaptiveAvgPool2d((1, 1))
 #model.fc = nn.Linear(512, 28)
+#model.fc = nn.Sequential(
+#            nn.BatchNorm1d(512),
+#            #nn.Dropout(0.5),
+#            nn.Linear(512, 28),
+#        )
 #model.fc = nn.Linear(2048, 28)
 
 if ADAPTIVE_POOLING:
@@ -813,9 +828,14 @@ if ADAPTIVE_POOLING:
     #model.Conv2d_1a_3x3 = BasicConv2d(4, 32, kernel_size=3, stride=2)
     #model.Conv2d_1a_3x3.conv.weight = 
     #model.Conv2d_1a_3x3.bn = 
-    model.fc = nn.Linear(2048, 28)
-    torch.nn.init.xavier_uniform_(model.fc.weight)
+    #model.fc = nn.Linear(2048, 28)
     model.aux_logits = False
+    model.fc = nn.Sequential(
+                nn.BatchNorm1d(2048),
+                nn.Linear(2048, 28),
+            )
+    torch.nn.init.xavier_uniform_(model.fc[1].weight)
+
 else:
     model = torchvision.models.inception_v3(pretrained=True, transform_input=False)
     model.fc = nn.Linear(2048, 28)
@@ -843,12 +863,12 @@ if TRAIN:
     criterion = nn.BCEWithLogitsLoss().cuda()
     #criterion = FocalLoss().cuda()
     
-    #beginning = [{'params': p, 'lr': 1e-5} for n, p in list(model.named_parameters())[:3]]
-    #one = [{'params': p, 'lr': 1e-4} for n, p in model.named_parameters() if n.startswith('layer1')]
-    #two = [{'params': p, 'lr': 1e-3} for n, p in model.named_parameters() if n.startswith('layer2')]
-    #three = [{'params': p, 'lr': 1e-3} for n, p in model.named_parameters() if n.startswith('layer3')]
-    #four = [{'params': p, 'lr': 1e-2} for n, p in model.named_parameters() if n.startswith('layer4')]
-    #fc = [{'params': p, 'lr': 1e-2} for n, p in model.named_parameters() if n.startswith('fc')]
+    #beginning = [{'params': p, 'lr': 1e-5} for n, p in list(model.module.named_parameters())[:3]]
+    #one = [{'params': p, 'lr': 1e-4} for n, p in model.module.named_parameters() if n.startswith('layer1')]
+    #two = [{'params': p, 'lr': 1e-3} for n, p in model.module.named_parameters() if n.startswith('layer2')]
+    #three = [{'params': p, 'lr': 1e-3} for n, p in model.module.named_parameters() if n.startswith('layer3')]
+    #four = [{'params': p, 'lr': 1e-2} for n, p in model.module.named_parameters() if n.startswith('layer4')]
+    #fc = [{'params': p, 'lr': 1e-2} for n, p in model.module.named_parameters() if n.startswith('fc')]
 
     first = [{'params': p, 'lr': 1e-4} for n, p in model.module.named_parameters() if n.startswith('Conv2d')]
     middle = [{'params': p, 'lr': 1e-3} for n, p in model.module.named_parameters() if n[:7] in ['Mixed_5', 'Mixed_6', 'Mixed_7', 'AuxLogi']]
@@ -971,13 +991,23 @@ def train(dataloaders, model, criterion, optimizer, sigmoid_thresh, n_epochs):
                 model.train()
             else:
                 model.eval()
-            accumulation_steps = 1
             optimizer.zero_grad()
             for i, (X, y) in enumerate(tqdm.tqdm(dataloaders[phase])):
+                accumulation_steps = 4# if phase == 'train' else 8
                 batch_weights = torch.Tensor([sum(weights[np.array(sample)]) for sample in test_ds.mlb.inverse_transform(y)])
-                criterion.weights = batch_weights.cuda()
                 X = torch.as_tensor(X, dtype=torch.float32, device=device).cuda(non_blocking=True)
                 y = torch.as_tensor(y, dtype=torch.float32, device=device).cuda(non_blocking=True) if len(y) > 0 else y
+
+                #if phase == 'train':
+                #    X2 = X.clone()
+                #    X2[:, 1, :, :] = 0
+                #    y2 = y.clone()
+                #    y2[:, :] = 0
+                #    X = torch.cat((X, X2), 0)
+                #    y = torch.cat((y, y2), 0)
+                #    batch_weights = torch.cat((batch_weights, batch_weights), 0)
+
+                criterion.weights = batch_weights.cuda()
 
                 with torch.set_grad_enabled(phase == 'train'):
                     y_ = model(X)
@@ -1117,28 +1147,28 @@ if TRAIN:
 # In[50]:
 
 
-# if SUBMISSION_RUN:
-#     start_ts = time.time()
-#     model.eval()
+if SUBMISSION_RUN and TTA:
+    start_ts = time.time()
+    model.eval()
 
-#     y_predictions = []
-#     n_tta = 4
-#     with torch.no_grad():
-#         for i in range(len(test_ds)):
-#             if i % 256 == 0:
-#                 print(i, '/', len(test_ds))
-#             y_ = []
-#             for _ in range(n_tta):
-#                 X, y = test_ds[i]
-#                 X = torch.as_tensor(X, dtype=torch.float32, device=device).cuda(non_blocking=True)[None, :, :, :]
-#                 y_.append(model(X))
-#             y_ = torch.stack(y_).mean(0)
-#             y_ = sigmoid(y_)
-#             y_ = y_.to('cpu').numpy()
-#             y_predictions.extend(y_)
+    y_predictions = []
+    n_tta = 4
+    with torch.no_grad():
+        for i in range(len(test_ds)):
+            if i % 256 == 0:
+                print(i, '/', len(test_ds))
+            y_ = []
+            for _ in range(n_tta):
+                X, y = test_ds[i]
+                X = torch.as_tensor(X, dtype=torch.float32, device=device).cuda(non_blocking=True)[None, :, :, :]
+                y_.append(model(X))
+            y_ = torch.stack(y_).mean(0)
+            y_ = sigmoid(y_)
+            y_ = y_.to('cpu').numpy()
+            y_predictions.extend(y_)
 
-#     y_predictions = np.stack(y_predictions)
-#     print(f'Total eval time: {time.time() - start_ts:0.3f}s')
+    y_predictions = np.stack(y_predictions)
+    print(f'Total eval time: {time.time() - start_ts:0.3f}s')
 
 
 # In[43]:
@@ -1247,7 +1277,7 @@ if TRAIN:
 # In[63]:
 
 
-if SUBMISSION_RUN:
+if SUBMISSION_RUN and not TTA:
     start_ts = time.time()
     model.eval()
 
@@ -1268,7 +1298,7 @@ if SUBMISSION_RUN:
 
 
 if SUBMISSION_RUN:
-    for t in [.1, .2, .3, .4, .5]:
+    for t in [.1, .2, .25, .225, .3, .4, .5]:
         submission = test_df[['Id', 'Predicted']].copy()
         Predicted = []
         for i, prediction in enumerate(test_ds.mlb.inverse_transform(y_predictions > t)):
