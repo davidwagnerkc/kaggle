@@ -1,10 +1,11 @@
 import copy
+from collections import deque
 import itertools
 import time
 from pathlib import Path
 import os
 
-from multiprocessing.dummy import Pool
+import multiprocessing as mp
 import numpy as np
 import pandas as pd
 from PIL import Image
@@ -57,16 +58,20 @@ test_df = pd.read_csv(DATA_DIR / 'sample_submission.csv')
 HPA_DIR = Path('../input/HPAv18/')
 hpa_df = pd.read_csv('../HPAv18RBGY_wodpl.csv')
 
-CHECKPOINT_PATH = Path('inceptionv3_512_nog_acc32x4_7norm-best_model-21.pth')
+#CHECKPOINT_PATH = Path('inceptionv3_512_nog_acc32x4_7norm-best_model-21.pth')
+CHECKPOINT_PATH = Path('dw_299_res18_nog3-14-aug-best_model-28.pth')
 
 LOAD_CHECKPOINT = True 
 
-TRAIN = False 
+TRAIN = True 
 ADD_HPA = True 
 
+ONLY_VAL = True
 SUBMISSION_RUN = True 
 TTA = True
+VAL_TTA = True
 
+ARCH = 'resnet18' # 'inceptionv3'
 N_EPOCHS = 25 
 BATCH_SIZE = 32 * 8
 LEARNING_RATE = 1e-3
@@ -75,8 +80,7 @@ VALIDATION_SIZE = .20
 VISDOM_ENV_NAME = 'inceptionv3_512_nog_acc32x4_7norm'
 
 ADAPTIVE_POOLING = True
-PINNED = True
-NUM_WORKERS = 64 
+NUM_WORKERS = mp.cpu_count() 
 
 vis = visdom.Visdom(env=VISDOM_ENV_NAME, server='http://3.17.85.107')
 
@@ -139,8 +143,10 @@ class ProteinDataset(Dataset):
     def __getitem__(self, key):
         id_ = self.df.loc[key].Id
         is_additional_hpa = self.df.loc[key].get('hpa', False)
+        choice = self.df.loc[key].get('choice', 'random')
 
         if is_additional_hpa:
+            print('a')
             image_paths = [HPA_DIR / f'{id_}_{c}.png' for c in self.colors]
             rgb = np.array(Image.open(HPA_DIR / f'{id_}.png'), np.uint8)
         else:
@@ -151,9 +157,9 @@ class ProteinDataset(Dataset):
                 g,
                 b,
             ], axis=2)
-        #aug = ShiftScaleRotate(shift_limit=0, scale_limit=(0, .25), rotate_limit=180, p=1)
-        #if self.train:
-        #    rgb = augment_wrap(aug, rgb)
+        aug = alb.ShiftScaleRotate(shift_limit=0, scale_limit=(0, .25), rotate_limit=180, p=.5)
+        if self.train:
+            rgb = augment_wrap(aug, rgb)
         X = self.transform(rgb)
 
         y = []
@@ -162,12 +168,13 @@ class ProteinDataset(Dataset):
             y = self.mlb.transform([y]).squeeze()  # TODO: This is weird.
         
         if self.train:
-            X = self.dihedral(X)
-        # TODO: Confirm correct to return tensor then push to gpu
-        return torch.as_tensor(X), torch.as_tensor(y)
+            X = self.dihedral(X, choice)
 
-    def dihedral(self, x):
-        choice = np.random.randint(8)
+        return torch.as_tensor(X, dtype=torch.float32), torch.as_tensor(y, dtype=torch.float32)
+
+    def dihedral(self, x, choice='random'):
+        if choice == 'random':
+            choice = np.random.randint(8)
         if choice == 0:  # no rotation
             x = np.rot90(x, k=0, axes=(1, 2)).copy()
         elif choice == 1:  # 90
@@ -196,9 +203,20 @@ class ProteinDataset(Dataset):
 
 train_split, val_split = train_test_split(train_df, test_size=VALIDATION_SIZE, random_state=0)
 
-selection_df['hpa'] = True
+# TODO: What is happening here?
+#hpa_df['hpa'] = True
 train_split['hpa'] = False
 
+if VAL_TTA:
+    val_split['choice'] = 0
+    print(len(val_split))
+    orig = val_split.copy()
+    for i in range(1, 8):
+        tmp = orig.copy()
+        tmp['choice'] = i
+        val_split = val_split.append(tmp)
+val_split = val_split.append(val_split)
+print(len(val_split))
 if ADD_HPA:
     train_split = train_split.append(hpa_df)
 
@@ -247,8 +265,8 @@ def plot_labels(df, ax):
 # plot_labels(train_split, ax2)
 
 transform = transforms.Compose([
-    #transforms.ToPILImage(),
-    #transforms.Resize((299, 299)),
+    transforms.ToPILImage(),
+    transforms.Resize((299, 299)),
     transforms.ToTensor(),
     transforms.Normalize(
         mean=[0.485, 0.456, 0.406],
@@ -265,7 +283,7 @@ train_ds = ProteinDataset(
     preproc=False,
 
 )
-train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, pin_memory=PINNED, shuffle=True, num_workers=NUM_WORKERS, drop_last=True)
+train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, pin_memory=True, shuffle=True, num_workers=NUM_WORKERS, drop_last=True)
 
 val_ds = ProteinDataset(
     val_split,
@@ -275,7 +293,7 @@ val_ds = ProteinDataset(
     device=device,
     preproc=False,
 )
-val_dl = DataLoader(val_ds, batch_size=BATCH_SIZE, pin_memory=PINNED, num_workers=NUM_WORKERS)
+val_dl = DataLoader(val_ds, batch_size=BATCH_SIZE, pin_memory=True, num_workers=NUM_WORKERS)
 
 dataloaders = {'train': train_dl, 'val': val_dl}
 
@@ -287,6 +305,7 @@ test_ds = ProteinDataset(
     device=device,
     preproc=False,
 )
+# TODO: Crash with pin_memory=True ...
 test_dl = DataLoader(test_ds, batch_size=BATCH_SIZE, pin_memory=False, num_workers=NUM_WORKERS)
 
 class Inception3Adaptive(torchvision.models.Inception3):
@@ -443,47 +462,46 @@ class FocalLoss(nn.Module):
         
         return loss.sum(dim=1).mean()
 
-# Download pretrained InceptionV3. transform_input is image normalization, which
-# we have already done
-#model = torchvision.models.resnet18(pretrained=True)
-#w = model.conv1.weight
-#model.conv1 = nn.Conv2d(4, 64, kernel_size=7, stride=2, padding=3, bias=False)
-#model.conv1.weight = nn.Parameter(torch.cat((w, 0.5 * (w[:, :1, :, :] + w[:, 2:, :, :])), dim=1))
-#model = torchvision.models.resnet50(pretrained=True)
-#model.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-#model.fc = nn.Linear(512, 28)
-#model.fc = nn.Sequential(
-#            nn.BatchNorm1d(512),
-#            #nn.Dropout(0.5),
-#            nn.Linear(512, 28),
-#        )
-#model.fc = nn.Linear(2048, 28)
+if ARCH == 'resnet18':
+    model = torchvision.models.resnet18(pretrained=True)
+    model.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+    model.fc = nn.Sequential(
+                nn.BatchNorm1d(512),
+                nn.Linear(512, 28),
+            )
+    torch.nn.init.xavier_uniform_(model.fc[1].weight)
+    
+    model = torch.nn.DataParallel(model)
+    beginning = [{'params': p, 'lr': 1e-5} for n, p in list(model.module.named_parameters())[:3]]
+    one = [{'params': p, 'lr': 1e-4} for n, p in model.module.named_parameters() if n.startswith('layer1')]
+    two = [{'params': p, 'lr': 1e-3} for n, p in model.module.named_parameters() if n.startswith('layer2')]
+    three = [{'params': p, 'lr': 1e-3} for n, p in model.module.named_parameters() if n.startswith('layer3')]
+    four = [{'params': p, 'lr': 1e-2} for n, p in model.module.named_parameters() if n.startswith('layer4')]
+    fc = [{'params': p, 'lr': 1e-2} for n, p in model.module.named_parameters() if n.startswith('fc')]
+    optim_params = beginning + one + two + three + four + fc
 
-if ADAPTIVE_POOLING:
+elif ARCH == 'inceptionv3':
     pretrained = torchvision.models.inception_v3(pretrained=True, transform_input=False)
     model = Inception3Adaptive(transform_input=False)
     model.load_state_dict(pretrained.state_dict())
-    #model.Conv2d_1a_3x3 = BasicConv2d(4, 32, kernel_size=3, stride=2)
-    #model.Conv2d_1a_3x3.conv.weight = 
-    #model.Conv2d_1a_3x3.bn = 
-    #model.fc = nn.Linear(2048, 28)
     model.aux_logits = False
     model.fc = nn.Sequential(
-                nn.BatchNorm1d(2048),
-                nn.Linear(2048, 28),
-            )
+            nn.BatchNorm1d(2048),
+            nn.Linear(2048, 28),
+        )
     torch.nn.init.xavier_uniform_(model.fc[1].weight)
 
-else:
-    model = torchvision.models.inception_v3(pretrained=True, transform_input=False)
-    model.fc = nn.Linear(2048, 28)
-    model.aux_logits = False
+    model = torch.nn.DataParallel(model)
+    first = [{'params': p, 'lr': 1e-4} for n, p in model.module.named_parameters() if n.startswith('Conv2d')]
+    middle = [{'params': p, 'lr': 1e-3} for n, p in model.module.named_parameters() if n[:7] in ['Mixed_5', 'Mixed_6', 'Mixed_7', 'AuxLogi']]
+    last = [{'params': p, 'lr': 1e-2} for n, p in model.module.named_parameters() if n.startswith('fc')]
+    optim_params = first + middle + last
+
 
 sigmoid = nn.Sigmoid()
 
 start_epoch = 0
 if LOAD_CHECKPOINT:
-    model = torch.nn.DataParallel(model)
     checkpoint = torch.load(CHECKPOINT_PATH)
     start_epoch = checkpoint['epoch']
     model.load_state_dict(checkpoint['state_dict'])
@@ -498,18 +516,6 @@ if TRAIN:
     criterion = nn.BCEWithLogitsLoss().cuda()
     #criterion = FocalLoss().cuda()
     
-    #beginning = [{'params': p, 'lr': 1e-5} for n, p in list(model.module.named_parameters())[:3]]
-    #one = [{'params': p, 'lr': 1e-4} for n, p in model.module.named_parameters() if n.startswith('layer1')]
-    #two = [{'params': p, 'lr': 1e-3} for n, p in model.module.named_parameters() if n.startswith('layer2')]
-    #three = [{'params': p, 'lr': 1e-3} for n, p in model.module.named_parameters() if n.startswith('layer3')]
-    #four = [{'params': p, 'lr': 1e-2} for n, p in model.module.named_parameters() if n.startswith('layer4')]
-    #fc = [{'params': p, 'lr': 1e-2} for n, p in model.module.named_parameters() if n.startswith('fc')]
-
-    first = [{'params': p, 'lr': 1e-4} for n, p in model.module.named_parameters() if n.startswith('Conv2d')]
-    middle = [{'params': p, 'lr': 1e-3} for n, p in model.module.named_parameters() if n[:7] in ['Mixed_5', 'Mixed_6', 'Mixed_7', 'AuxLogi']]
-    last = [{'params': p, 'lr': 1e-2} for n, p in model.module.named_parameters() if n.startswith('fc')]
-    optim_params = first + middle + last
-    #optim_params = beginning + one + two + three + four + fc
     optimizer = AdamW(params=optim_params, lr=LEARNING_RATE, weight_decay=1e-5)
     if LOAD_CHECKPOINT:
         optimizer.load_state_dict(checkpoint['optimizer'])
@@ -519,8 +525,6 @@ if TRAIN:
                     state[k] = v.cuda()
 
 model.to(device)
-if not LOAD_CHECKPOINT:
-    model = torch.nn.DataParallel(model)
 
 class RunningStats():
     def __init__(self):
@@ -593,17 +597,23 @@ def train(dataloaders, model, criterion, optimizer, sigmoid_thresh, n_epochs):
         print(f'Epoch {epoch + 1}/{n_epochs}')
         
         for phase in ['train', 'val']:
+            hold_y = []
+            hold_y_ = []
             if phase == 'train':
+                if ONLY_VAL:
+                    continue
                 model.train()
             else:
                 model.eval()
+
             optimizer.zero_grad()
             for i, (X, y) in enumerate(tqdm.tqdm(dataloaders[phase])):
                 accumulation_steps = 4# if phase == 'train' else 8
                 batch_weights = torch.Tensor([sum(weights[np.array(sample)]) for sample in test_ds.mlb.inverse_transform(y)])
-                X = torch.as_tensor(X, dtype=torch.float32, device=device).cuda(non_blocking=True)
-                y = torch.as_tensor(y, dtype=torch.float32, device=device).cuda(non_blocking=True) if len(y) > 0 else y
-
+                #X = torch.as_tensor(X, dtype=torch.float32, device=device).cuda(non_blocking=True)
+                #y = torch.as_tensor(y, dtype=torch.float32, device=device).cuda(non_blocking=True) if len(y) > 0 else y
+                X = X.cuda(non_blocking=True)
+                y = y.cuda(non_blocking=True) if len(y) > 0 else y
                 #if phase == 'train':
                 #    X2 = X.clone()
                 #    X2[:, 1, :, :] = 0
@@ -628,36 +638,46 @@ def train(dataloaders, model, criterion, optimizer, sigmoid_thresh, n_epochs):
                         optimizer.zero_grad()
 
                         stats.train_loss.update(loss.item(), n=X.shape[0])
-                        f1 = f1_score(y.cpu(), sigmoid(y_.to('cpu')) > sigmoid_thresh, average='macro')
-                        stats.train_f1.update(f1, n=X.shape[0])
+                        hold_y.append(y)
+                        hold_y_.append(y_)
                     else:
                         stats.val_loss.update(loss.item(), n=X.shape[0])
-                        f1, best_thresh = 0, 0
-                        ycpu = y.cpu()
-                        y_cpu = sigmoid(y_.to('cpu'))
-                        for thresh in np.linspace(.1, .9, 100):
-                            score = f1_score(ycpu, y_cpu > thresh, average='macro')
-                            if score > f1:
-                                f1, best_thresh = score, thresh
-                        stats.val_f1.update(f1, n=X.shape[0])
+                        hold_y.append(y)
+                        hold_y_.append(y_)
 
-        vis.line([stats.train_loss.avg], [total_epochs], update='append', opts={'title': 'Train Loss'}, win='Train Loss')
-        vis.line([stats.train_f1.avg], [total_epochs], update='append', opts={'title': 'Train F1'}, win='Train F1')
-        print(f'(train) loss: {stats.train_loss.avg} f1: {stats.train_f1.avg}')
-        vis.line([stats.val_loss.avg], [total_epochs], update='append', opts={'title': 'Val Loss'}, win='Val Loss')
-        vis.line([stats.val_f1.avg], [total_epochs], update='append', opts={'title': 'Val F1'}, win='Val F1')
-        print(f'(val) loss: {stats.val_loss.avg} f1: {stats.val_f1.avg} thresh: {best_thresh}')
+        f1, best_thresh = 0, 0
+        top_5 = deque([], maxlen=5)
+        hold_y = torch.cat(hold_y).cpu()
+        hold_y_ = sigmoid(torch.cat(hold_y_)).cpu()
+        for thresh in np.linspace(0, 1, 100):
+            score = f1_score(hold_y, hold_y_ > thresh, average='macro')
+            if score > f1:
+                top_5.append((score, thresh))
+                f1, best_thresh = score, thresh
+        for s, t in top_5:
+            print(f'{s:.3f} - {t:.3f}')
+
+        if phase == 'train':
+            stats.train_f1.update(f1, n=X.shape[0])
+            vis.line([stats.train_loss.avg], [total_epochs], update='append', opts={'title': 'Train Loss'}, win='Train Loss')
+            vis.line([stats.train_f1.avg], [total_epochs], update='append', opts={'title': 'Train F1'}, win='Train F1')
+            print(f'(train) loss: {stats.train_loss.avg} f1: {stats.train_f1.avg}')
+        else:
+            stats.val_f1.update(f1, n=X.shape[0])
+            vis.line([stats.val_loss.avg], [total_epochs], update='append', opts={'title': 'Val Loss'}, win='Val Loss')
+            vis.line([stats.val_f1.avg], [total_epochs], update='append', opts={'title': 'Val F1'}, win='Val F1')
+            print(f'(val) loss: {stats.val_loss.avg} f1: {stats.val_f1.avg} thresh: {best_thresh}')
             
-        if stats.val_f1.avg > best_f1 or epoch + 1 == n_epochs:
-            best_f1 = stats.val_f1.avg
-            save_state = dict(
-                epoch=total_epochs,
-                state_dict=model.state_dict(),
-                f1=stats.val_f1.avg,
-                loss=stats.val_loss.avg,
-                optimizer=optimizer.state_dict(),
-            )
-            torch.save(save_state, f'{VISDOM_ENV_NAME}-best_model-{total_epochs}.pth')
+            if stats.val_f1.avg > best_f1 or epoch + 1 == n_epochs:
+                best_f1 = stats.val_f1.avg
+                save_state = dict(
+                    epoch=total_epochs,
+                    state_dict=model.state_dict(),
+                    f1=stats.val_f1.avg,
+                    loss=stats.val_loss.avg,
+                    optimizer=optimizer.state_dict(),
+                )
+                torch.save(save_state, f'{VISDOM_ENV_NAME}-best_model-{total_epochs}.pth')
 
 if TRAIN:
     train(dataloaders, model, criterion, optimizer, sigmoid_thresh=SIGMOID_THRESHOLD, n_epochs=N_EPOCHS)
