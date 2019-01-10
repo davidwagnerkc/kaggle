@@ -67,9 +67,9 @@ TRAIN = True
 ADD_HPA = True 
 NEGATIVE = False 
 
-ONLY_VAL = False 
+ONLY_VAL = True 
 TRAIN_VAL = True
-VAL_TTA = False
+VAL_TTA = 8 
 SUBMISSION_RUN = True 
 TTA = True
 
@@ -80,7 +80,7 @@ BATCH_SIZE = 32 * 8
 LEARNING_RATE = 1e-3
 SIGMOID_THRESHOLD = 0.5
 VALIDATION_SIZE = .20
-VISDOM_ENV_NAME = 'final_512batch_halflr_all'
+VISDOM_ENV_NAME = 'final_valtest'
 
 NUM_WORKERS = mp.cpu_count()
 
@@ -754,49 +754,19 @@ def train(dataloaders, model, criterion, optimizer, sigmoid_thresh, n_epochs):
 
 def evaluate(test_dl, model, criterion, optimizer, sigmoid_thresh, n_epochs):
     model.eval()
+    y_predictions = []
 
-    hold_y = []
-    hold_y_ = []
-
-    for i, (X, y) in enumerate(tqdm.tqdm(test_dl)):
+    for i, (X, _) in enumerate(tqdm.tqdm(test_dl)):
         X = X.cuda(non_blocking=True)
-        y = y.cuda(non_blocking=True) if len(y) > 0 else y
 
         with torch.set_grad_enabled(False):
             y_ = model(X)
+            y_predictions.append(y_)
 
-            hold_y.append(y)
-            hold_y_.append(y_)
+    y_predictions = sigmoid(torch.cat(y_predictions)).cpu()
 
-    f1, best_thresh = 0, 0
-    top_5 = deque([], maxlen=5)
-    hold_y = torch.cat(hold_y).cpu()
-    hold_y_ = sigmoid(torch.cat(hold_y_)).cpu()
-    if VAL_TTA:
-        hold_y = hold_y.reshape((VAL_TTA, -1, 28)).mean(dim=0)
-        hold_y_ = hold_y_.reshape((VAL_TTA, -1, 28)).mean(dim=0)
-
-    for thresh in np.linspace(0, 1, 100):
-        score = f1_score(hold_y, hold_y_ > thresh, average='macro')
-        if score > f1:
-            top_5.append((score, thresh))
-            f1, best_thresh = score, thresh
-    lb_thresh = torch.Tensor([
-        0.362397820,0.043841336,0.075268817,0.059322034,0.075268817,
-        0.075268817,0.043841336,0.075268817,0.010000000,0.010000000,
-        0.010000000,0.043841336,0.043841336,0.014198783,0.043841336,
-        0.010000000,0.028806584,0.014198783,0.028806584,0.059322034,
-        0.010000000,0.126126126,0.028806584,0.075268817,0.010000000,
-        0.222493880,0.028806584,0.010000000
-    ])
-    for thresh in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]:
-        score = f1_score(hold_y, hold_y_ > lb_thresh * thresh, average='macro')
-        if score > f1:
-            top_5.append((score, 99))
-            f1, best_thresh = score, thresh 
-
-    for s, t in top_5:
-        print(f'{s:.3f} - {t:.3f}', end=' ')
+    if TTA:
+        y_predictions = y_predictions.reshape((VAL_TTA, -1, 28)).mean(dim=0)
 
     for t in [.1, .2, .25, .225, .3, .4, .5]:
         submission = test_df[['Id', 'Predicted']].copy()
