@@ -63,15 +63,16 @@ CHECKPOINT_PATH = Path('final_512batch_halflr-best_model-19.pth')
 
 LOAD_CHECKPOINT = True 
 
-TRAIN = True 
+TRAIN = False 
 ADD_HPA = True 
 NEGATIVE = False 
 
-ONLY_VAL = True 
-TRAIN_VAL = True
-VAL_TTA = 8 
+ONLY_VAL = False 
+TRAIN_VAL = False 
+VAL_TTA = 8
+
 SUBMISSION_RUN = True 
-TTA = True
+TEST_TTA = 8
 
 #ARCH = 'resnet18'
 ARCH = 'inceptionv3'
@@ -87,6 +88,9 @@ NUM_WORKERS = mp.cpu_count()
 vis = visdom.Visdom(env=VISDOM_ENV_NAME, server='http://3.17.85.107')
 
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+
+if ONLY_VAL:
+    BATCH_SIZE *= 2
 
 LABELS = {
     0: 'Nucleoplasm', 
@@ -159,7 +163,12 @@ class ProteinDataset(Dataset):
                 b,
             ], axis=2)
         if choice == 'shift':
-            aug = alb.ShiftScaleRotate(shift_limit=0, scale_limit=(0, .25), rotate_limit=180, p=1)
+            aug = alb.ShiftScaleRotate(shift_limit=0.01, interpolation=4, border_mode=0, scale_limit=(0, .1), rotate_limit=360, p=1)
+            if self.train:
+                rgb = augment_wrap(aug, rgb)
+            choice = 0
+        elif choice == 'rotate':
+            aug = alb.Rotate(limit=360, interpolation=4, border_mode=0, p=1)
             if self.train:
                 rgb = augment_wrap(aug, rgb)
             choice = 0
@@ -206,25 +215,29 @@ class ProteinDataset(Dataset):
 
 train_split, val_split = train_test_split(train_df, test_size=VALIDATION_SIZE, random_state=0)
 
-# TODO: What is happening here?
 hpa_df['hpa'] = True
 train_split['hpa'] = False
 
+orig = val_split.copy()
 if VAL_TTA:
     val_split['choice'] = 0
-    print(len(val_split))
-    orig = val_split.copy()
     for i in range(1, VAL_TTA):
         tmp = orig.copy()
-        tmp['choice'] = 'shift' #i
+        tmp['choice'] = i 
         val_split = val_split.append(tmp)
-#val_split['choice'] = 'shift'
-print(len(val_split))
+print(len(orig), ' -> ', len(val_split))
+
+test_df_original = test_df.copy()
+if TEST_TTA:
+    test_df['choice'] = 0
+    for i in range(1, TEST_TTA):
+        tmp = test_df_original.copy()
+        tmp['choice'] = i 
+        test_df = test_df.append(tmp)
+print(len(test_df_original), ' -> ', len(test_df))
 
 if ADD_HPA:
     train_split = train_split.append(hpa_df)
-
-#train_split['choice'] = 'shift'
 
 def over_under_sampler(targets):
     n_samples = {
@@ -334,13 +347,16 @@ val_ds = ProteinDataset(
 )
 val_dl = DataLoader(val_ds, batch_size=BATCH_SIZE, pin_memory=True, num_workers=NUM_WORKERS)
 
-dataloaders = {'train': val_dl, 'val': val_dl}
+dataloaders = {'train': train_dl, 'val': val_dl}
+
+if TRAIN_VAL:
+    dataloaders['train'] = val_dl
 
 test_ds = ProteinDataset(
     test_df,
     images_dir=TEST_DIR,
     transform=transform,
-    train=False,
+    train=True,
     device=device,
     preproc=False,
 )
@@ -694,15 +710,19 @@ def train(dataloaders, model, criterion, optimizer, sigmoid_thresh, n_epochs):
             top_5 = deque([], maxlen=5)
             hold_y = torch.cat(hold_y).cpu()
             hold_y_ = sigmoid(torch.cat(hold_y_)).cpu()
+            print('hold_y_ before', hold_y_.shape)
             if VAL_TTA:
                 hold_y = hold_y.reshape((VAL_TTA, -1, 28)).mean(dim=0)
                 hold_y_ = hold_y_.reshape((VAL_TTA, -1, 28)).mean(dim=0)
 
-            for thresh in np.linspace(0, 1, 100):
+            print('hold_y_ after', hold_y_.shape)
+
+            for thresh in np.linspace(0, 1, 200):
                 score = f1_score(hold_y, hold_y_ > thresh, average='macro')
                 if score > f1:
                     top_5.append((score, thresh))
                     f1, best_thresh = score, thresh
+
             lb_thresh = torch.Tensor([
                 0.362397820,0.043841336,0.075268817,0.059322034,0.075268817,
                 0.075268817,0.043841336,0.075268817,0.010000000,0.010000000,
@@ -711,14 +731,17 @@ def train(dataloaders, model, criterion, optimizer, sigmoid_thresh, n_epochs):
                 0.010000000,0.126126126,0.028806584,0.075268817,0.010000000,
                 0.222493880,0.028806584,0.010000000
             ])
-            for thresh in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]:
-                score = f1_score(hold_y, hold_y_ > lb_thresh * thresh, average='macro')
-                if score > f1:
-                    top_5.append((score, 99))
-                    f1, best_thresh = score, thresh 
+
+            #for thresh in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]:
+            #    score = f1_score(hold_y, hold_y_ > lb_thresh * thresh, average='macro')
+            #    if score > f1:
+            #        top_5.append((score, 99))
+            #        f1, best_thresh = score, thresh 
 
             for s, t in top_5:
                 print(f'{s:.3f} - {t:.3f}', end=' ')
+
+            print(f1, best_thresh)
 
             if phase == 'train':
                 stats.train_f1.update(f1, n=X.shape[0])
@@ -752,158 +775,28 @@ def train(dataloaders, model, criterion, optimizer, sigmoid_thresh, n_epochs):
                     )
                     torch.save(save_state, f'{VISDOM_ENV_NAME}-best_model-{total_epochs}.pth')
 
-def evaluate(test_dl, model, criterion, optimizer, sigmoid_thresh, n_epochs):
+def evaluate(dl, model):
     model.eval()
     y_predictions = []
 
-    for i, (X, _) in enumerate(tqdm.tqdm(test_dl)):
+    for i, (X, _) in enumerate(tqdm.tqdm(dl)):
         X = X.cuda(non_blocking=True)
 
         with torch.set_grad_enabled(False):
             y_ = model(X)
             y_predictions.append(y_)
 
+    import pdb; pdb.set_trace()
+
     y_predictions = sigmoid(torch.cat(y_predictions)).cpu()
+    print(y_predictions.shape)
 
-    if TTA:
-        y_predictions = y_predictions.reshape((VAL_TTA, -1, 28)).mean(dim=0)
+    if TEST_TTA:
+        y_predictions = y_predictions.reshape((TEST_TTA, -1, 28)).mean(dim=0)
+    print(y_predictions.shape)
 
-    for t in [.1, .2, .25, .225, .3, .4, .5]:
-        submission = test_df[['Id', 'Predicted']].copy()
-        Predicted = []
-        for i, prediction in enumerate(test_ds.mlb.inverse_transform(y_predictions > t)):
-            if len(prediction) == 0:
-                prediction = tuple([np.argmax(y_predictions[i])])
-            all_labels = []
-            for label in prediction:
-                all_labels.append(str(label))
-            Predicted.append(' '.join(all_labels))
-
-    submission['Predicted'] = Predicted
-
-    submission.to_csv(f'protein_classification{str(t * 10)}.csv', index=False)
-
-    np.save('y_sigmoid_predictions.npy', y_predictions)  # For offline work on setting thresholds
-
-if TRAIN:
-    train(dataloaders, model, criterion, optimizer, sigmoid_thresh=SIGMOID_THRESHOLD, n_epochs=N_EPOCHS)
-
-
-if SUBMISSION_RUN and TTA:
-    start_ts = time.time()
-    model.eval()
-
-    y_predictions = []
-    n_tta = 4
-    with torch.no_grad():
-        for i in range(len(test_ds)):
-            if i % 256 == 0:
-                print(i, '/', len(test_ds))
-            y_ = []
-            for _ in range(n_tta):
-                X, y = test_ds[i]
-                X = torch.as_tensor(X, dtype=torch.float32, device=device).cuda(non_blocking=True)[None, :, :, :]
-                y_.append(model(X))
-            y_ = torch.stack(y_).mean(0)
-            y_ = sigmoid(y_)
-            y_ = y_.to('cpu').numpy()
-            y_predictions.extend(y_)
-
-    y_predictions = np.stack(y_predictions)
-    print(f'Total eval time: {time.time() - start_ts:0.3f}s')
-
-# if SUBMISSION_RUN:
-#     start_ts = time.time()
-#     model.eval()
-
-#     y_1 = []
-#     y_2 = []
-#     y_3 = []
-#     y_4 = []
-
-#     y_truth = []
-#     n_tta = 1
-#     with torch.no_grad():
-#         for i in tqdm.tqdm_notebook(range(len(val_ds))):
-#             if i % 256 == 0:
-#                 print(i, '/', len(val_ds))
-#             y_ = []
-#             for _ in range(n_tta):
-#                 X, y = val_ds[i]
-#                 X = torch.as_tensor(X, dtype=torch.float32, device=device).cuda(non_blocking=True)[None, :, :, :]
-#                 y_.append(model(X))
-#             y_1.extend(sigmoid(y_[0]).to('cpu').numpy())
-# #             y_2.extend(sigmoid(y_[1]).to('cpu').numpy())
-# #             y_3.extend(sigmoid(y_[2]).to('cpu').numpy())
-# #             y_4.extend(sigmoid(y_[3]).to('cpu').numpy())
-#             y_truth.extend(y)
-
-#     y_1 = np.stack(y_1)
-# #     y_2 = np.stack(y_2)
-# #     y_3 = np.stack(y_3)
-# #     y_4 = np.stack(y_4)
-#     y_truth = np.stack(y_truth)
-#     print(f'Total eval time: {time.time() - start_ts:0.3f}s')
-
-# y2 = y_truth.reshape(5422, 28)
-
-# for i in range(28):
-#     max_ = (0, 0)
-#     for thresh in np.linspace(.1, .9, 100):
-#         f1 = f1_score(y2[:, i], y_[:, i] > thresh, average='macro')
-#         if f1 > max_[0]:
-#             max_ = (f1, thresh)
-#     print(i, thresh, f1)
-
-# for y_ in [y_1]:#, y_2, y_3, y_4]:
-#     max_ = (0, 0)
-#     for thresh in np.linspace(.1, .5, 100):
-#         t = np.array([thresh] * 27 + [.])
-# #         t[[8, 9, 10, 15, 17, 20, 24, 26, 27]] = thresh - .1
-# #         t[[8, 9, 10, 27]] = thresh - .3
-#         score = f1_score(y2, y_ > t, average='macro')
-#         if score > max_[0]:
-#             max_ = (score, thresh)
-#             submit_thresh = thresh
-#             submit_y_ = y_
-#     print(max_)
-
-# if SUBMISSION_RUN:
-#     submission = test_df[['Id', 'Predicted']].copy()
-#     Predicted = []
-#     for i, prediction in enumerate(test_ds.mlb.inverse_transform(y_ > submit_thresh)):
-#         if len(prediction) == 0:
-#             prediction = tuple([np.argmax(y_predictions[i])])
-#         all_labels = []
-#         for label in prediction:
-#             all_labels.append(str(label))
-#         Predicted.append(' '.join(all_labels))
-
-#     submission['Predicted'] = Predicted
-
-#     submission.to_csv('protein_classification.csv', index=False)
-
-# np.save('y_sigmoid_predictions.npy', y_predictions)  # For offline work on setting thresholds
-
-if SUBMISSION_RUN and not TTA:
-    start_ts = time.time()
-    model.eval()
-
-    y_predictions = []
-    with torch.no_grad():
-        for X, _ in tqdm.tqdm(test_dl):
-            X = torch.as_tensor(X, dtype=torch.float32, device=device).cuda(non_blocking=True)
-            y_ = model(X)
-            y_ = sigmoid(y_)
-            y_ = y_.to('cpu').numpy()
-            y_predictions.extend(y_)
-
-    y_predictions = np.stack(y_predictions)
-    print(f'Total eval time: {time.time() - start_ts:0.3f}s')
-
-if SUBMISSION_RUN:
-    for t in [.1, .2, .25, .225, .3, .4, .5]:
-        submission = test_df[['Id', 'Predicted']].copy()
+    for t in [.05, .1, .15, .2, .25, .3, .35, .4, .45, .5]:
+        submission = test_df_original[['Id', 'Predicted']].copy()
         Predicted = []
         for i, prediction in enumerate(test_ds.mlb.inverse_transform(y_predictions > t)):
             if len(prediction) == 0:
@@ -914,8 +807,12 @@ if SUBMISSION_RUN:
             Predicted.append(' '.join(all_labels))
 
         submission['Predicted'] = Predicted
-
         submission.to_csv(f'protein_classification{str(t * 10)}.csv', index=False)
 
-np.save('y_sigmoid_predictions.npy', y_predictions)  # For offline work on setting thresholds
+    np.save(f'y_{CHECKPOINT_PATH}.npy', y_predictions)  # For offline work on setting thresholds
 
+if TRAIN:
+    train(dataloaders, model, criterion, optimizer, sigmoid_thresh=SIGMOID_THRESHOLD, n_epochs=N_EPOCHS)
+
+if SUBMISSION_RUN:
+    evaluate(test_dl, model)
