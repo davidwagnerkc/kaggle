@@ -58,13 +58,13 @@ test_df = pd.read_csv(DATA_DIR / 'sample_submission.csv')
 HPA_DIR = Path('../input/HPAv18/')
 hpa_df = pd.read_csv('../HPAv18RBGY_wodpl.csv')
 
-#CHECKPOINT_PATH = Path('inceptionv3_512_nog_acc32x4_7norm-best_model-21.pth')
-CHECKPOINT_PATH = Path('resnet18_299-best_model-17.pth')
+CHECKPOINT_PATH = Path('inceptionv3_512_nog_acc32x4_7norm-best_model-21.pth')
+#CHECKPOINT_PATH = Path('resnet18_299-best_model-17.pth')
 
 LOAD_CHECKPOINT = False 
 
 TRAIN = True 
-ADD_HPA = False 
+ADD_HPA = True 
 NEGATIVE = False 
 
 ONLY_VAL = False 
@@ -79,7 +79,7 @@ BATCH_SIZE = 32 * 8
 LEARNING_RATE = 1e-3
 SIGMOID_THRESHOLD = 0.5
 VALIDATION_SIZE = .20
-VISDOM_ENV_NAME = 'resnet18_512'
+VISDOM_ENV_NAME = 'final_base'
 
 NUM_WORKERS = mp.cpu_count()
 
@@ -301,7 +301,7 @@ def plot_labels(df, ax):
 # plot_labels(train_split, ax2)
 trans = [
     transforms.ToPILImage(),
-    transforms.Resize((299, 299)),
+    transforms.Resize((224, 224)),
     transforms.ToTensor(),
     transforms.Normalize(
         mean=[0.485, 0.456, 0.406],
@@ -646,7 +646,7 @@ def train(dataloaders, model, criterion, optimizer, sigmoid_thresh, n_epochs):
 
             optimizer.zero_grad()
             for i, (X, y) in enumerate(tqdm.tqdm(dataloaders[phase])):
-                accumulation_steps = 1# if phase == 'train' else 8
+                accumulation_steps = 4# if phase == 'train' else 8
                 batch_weights = torch.Tensor([sum(weights[np.array(sample)]) for sample in test_ds.mlb.inverse_transform(y)])
                 X = X.cuda(non_blocking=True)
                 y = y.cuda(non_blocking=True) if len(y) > 0 else y
