@@ -1,4 +1,40 @@
-size': (10, 5),
+import copy
+from collections import deque
+import itertools
+import time
+from pathlib import Path
+import os
+
+import multiprocessing as mp
+import numpy as np
+import pandas as pd
+from PIL import Image
+import PIL
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data.dataset import Dataset
+from torch.utils.data.dataloader import DataLoader
+from torch.optim import Optimizer
+
+import albumentations as alb 
+
+import math
+import torchvision
+from torchvision import transforms
+import tqdm
+
+import imgaug as ia
+from imgaug import augmenters as iaa
+
+from sklearn.metrics import f1_score
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import MultiLabelBinarizer
+
+import matplotlib as mpl
+mpl_params = {
+    'figure.figsize': (10, 5),
     'figure.dpi': 300,
 }
 from matplotlib import pyplot as plt
@@ -26,9 +62,9 @@ hpa_df = pd.read_csv('../HPAv18RBGY_wodpl.csv')
 CHECKPOINT_PATH = Path('resnet18_299-best_model-17.pth')
 
 LOAD_CHECKPOINT = False 
-IMAGE_SIZE = 512
+
 TRAIN = True 
-ADD_HPA = True 
+ADD_HPA = False 
 NEGATIVE = False 
 
 ONLY_VAL = False 
@@ -39,7 +75,7 @@ TTA = True
 ARCH = 'resnet18'
 #ARCH = 'inceptionv3'
 N_EPOCHS = 25 
-BATCH_SIZE = 128 * 2
+BATCH_SIZE = 32 * 8
 LEARNING_RATE = 1e-3
 SIGMOID_THRESHOLD = 0.5
 VALIDATION_SIZE = .20
@@ -222,6 +258,7 @@ del train_split['oversample']
 train_split = train_split.reset_index(drop=True)
 
 labels, counts = np.unique(list(map(int, itertools.chain(*train_split.Target.str.split()))), return_counts=True)
+import numpy as np
 
 name_label_dict = {} 
 
@@ -271,8 +308,8 @@ trans = [
         std=[0.229, 0.224, 0.225]
     ),
 ]
-trans = trans if IMAGE_SIZE == 299 else trans[2:]
-transform = transforms.Compose(trans)
+#trans = trans if ARCH == 'resnet18' else trans[2:]
+transform = transforms.Compose(trans[2:])
 print(transform)
 
 train_ds = ProteinDataset(
@@ -496,7 +533,7 @@ elif ARCH == 'inceptionv3':
     first = [{'params': p, 'lr': 1e-4} for n, p in model.module.named_parameters() if n.startswith('Conv2d')]
     middle = [{'params': p, 'lr': 1e-3} for n, p in model.module.named_parameters() if n[:7] in ['Mixed_5', 'Mixed_6', 'Mixed_7', 'AuxLogi']]
     last = [{'params': p, 'lr': 1e-2} for n, p in model.module.named_parameters() if n.startswith('fc')]
-    optim_params = first + middle + lase
+    optim_params = first + middle + last
 
 
 sigmoid = nn.Sigmoid()
