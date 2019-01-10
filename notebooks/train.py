@@ -58,21 +58,21 @@ test_df = pd.read_csv(DATA_DIR / 'sample_submission.csv')
 HPA_DIR = Path('../input/HPAv18/')
 hpa_df = pd.read_csv('../HPAv18RBGY_wodpl.csv')
 
-#CHECKPOINT_PATH = Path('inceptionv3_512_nog_acc32x4_7norm-best_model-18.pth')
-CHECKPOINT_PATH = Path('final_512batch_halflr-best_model-19.pth')
+CHECKPOINT_PATH = Path('inceptionv3_512_nog_acc32x4_7norm-best_model-18.pth')
+#CHECKPOINT_PATH = Path('final_512batch_halflr-best_model-19.pth')
 
 LOAD_CHECKPOINT = True 
 
-TRAIN = False 
+TRAIN = True 
 ADD_HPA = True 
 NEGATIVE = False 
 
 ONLY_VAL = False 
 TRAIN_VAL = False 
-VAL_TTA = 8
+VAL_TTA = False #8
 
-SUBMISSION_RUN = True 
-TEST_TTA = 8
+SUBMISSION_RUN = False 
+TEST_TTA = False #8
 
 #ARCH = 'resnet18'
 ARCH = 'inceptionv3'
@@ -81,7 +81,7 @@ BATCH_SIZE = 32 * 8
 LEARNING_RATE = 1e-3
 SIGMOID_THRESHOLD = 0.5
 VALIDATION_SIZE = .20
-VISDOM_ENV_NAME = 'final_valtest'
+VISDOM_ENV_NAME = 'final_18aug'
 
 NUM_WORKERS = mp.cpu_count()
 
@@ -238,6 +238,8 @@ print(len(test_df_original), ' -> ', len(test_df))
 
 if ADD_HPA:
     train_split = train_split.append(hpa_df)
+
+train_split['choice'] = 'shift'
 
 def over_under_sampler(targets):
     n_samples = {
@@ -793,6 +795,7 @@ def evaluate(dl, model):
 
     if TEST_TTA:
         y_predictions = y_predictions.reshape((TEST_TTA, -1, 28)).mean(dim=0)
+    y_predictions = y_predictions.numpy()
     print(y_predictions.shape)
 
     for t in [.05, .1, .15, .2, .25, .3, .35, .4, .45, .5]:

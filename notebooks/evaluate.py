@@ -59,7 +59,7 @@ HPA_DIR = Path('../input/HPAv18/')
 hpa_df = pd.read_csv('../HPAv18RBGY_wodpl.csv')
 
 #CHECKPOINT_PATH = Path('inceptionv3_512_nog_acc32x4_7norm-best_model-18.pth')
-CHECKPOINT_PATH = Path('final_512batch_halflr-best_model-19.pth')
+CHECKPOINT_PATH = Path('submit_final_512batch_halflr-best_model-19')
 
 LOAD_CHECKPOINT = True 
 
@@ -786,13 +786,12 @@ def evaluate(dl, model):
             y_ = model(X)
             y_predictions.append(y_)
 
-    import pdb; pdb.set_trace()
-
     y_predictions = sigmoid(torch.cat(y_predictions)).cpu()
     print(y_predictions.shape)
 
     if TEST_TTA:
         y_predictions = y_predictions.reshape((TEST_TTA, -1, 28)).mean(dim=0)
+    y_predictions = y_predictions.numpy()
     print(y_predictions.shape)
 
     for t in [.05, .1, .15, .2, .25, .3, .35, .4, .45, .5]:
