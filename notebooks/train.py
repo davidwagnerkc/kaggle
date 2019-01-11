@@ -58,8 +58,8 @@ test_df = pd.read_csv(DATA_DIR / 'sample_submission.csv')
 HPA_DIR = Path('../input/HPAv18/')
 hpa_df = pd.read_csv('../HPAv18RBGY_wodpl.csv')
 
-CHECKPOINT_PATH = Path('inceptionv3_512_nog_acc32x4_7norm-best_model-18.pth')
-#CHECKPOINT_PATH = Path('final_512batch_halflr-best_model-19.pth')
+#CHECKPOINT_PATH = Path('inceptionv3_512_nog_acc32x4_7norm-best_model-18.pth')
+CHECKPOINT_PATH = Path('final_512batch_halflr-best_model-19.pth')
 
 LOAD_CHECKPOINT = True 
 
@@ -81,7 +81,7 @@ BATCH_SIZE = 32 * 8
 LEARNING_RATE = 1e-3
 SIGMOID_THRESHOLD = 0.5
 VALIDATION_SIZE = .20
-VISDOM_ENV_NAME = 'final_18aug'
+VISDOM_ENV_NAME = 'final_focal'
 
 NUM_WORKERS = mp.cpu_count()
 
@@ -239,7 +239,7 @@ print(len(test_df_original), ' -> ', len(test_df))
 if ADD_HPA:
     train_split = train_split.append(hpa_df)
 
-train_split['choice'] = 'shift'
+#train_split['choice'] = 'shift'
 
 def over_under_sampler(targets):
     n_samples = {
@@ -549,13 +549,13 @@ elif ARCH == 'inceptionv3':
     torch.nn.init.xavier_uniform_(model.fc[1].weight)
 
     model = torch.nn.DataParallel(model)
-    #first = [{'params': p, 'lr': 1e-4} for n, p in model.module.named_parameters() if n.startswith('Conv2d')]
-    #middle = [{'params': p, 'lr': 1e-3} for n, p in model.module.named_parameters() if n[:7] in ['Mixed_5', 'Mixed_6', 'Mixed_7', 'AuxLogi']]
-    #last = [{'params': p, 'lr': 1e-2} for n, p in model.module.named_parameters() if n.startswith('fc')]
+    first = [{'params': p, 'lr': 1e-4} for n, p in model.module.named_parameters() if n.startswith('Conv2d')]
+    middle = [{'params': p, 'lr': 1e-3} for n, p in model.module.named_parameters() if n[:7] in ['Mixed_5', 'Mixed_6', 'Mixed_7', 'AuxLogi']]
+    last = [{'params': p, 'lr': 1e-2} for n, p in model.module.named_parameters() if n.startswith('fc')]
 
-    first = [{'params': p, 'lr': 1e-8} for n, p in model.module.named_parameters() if n.startswith('Conv2d')]
-    middle = [{'params': p, 'lr': 1e-6} for n, p in model.module.named_parameters() if n[:7] in ['Mixed_5', 'Mixed_6', 'Mixed_7', 'AuxLogi']]
-    last = [{'params': p, 'lr': 1e-4} for n, p in model.module.named_parameters() if n.startswith('fc')]
+    #first = [{'params': p, 'lr': 1e-8} for n, p in model.module.named_parameters() if n.startswith('Conv2d')]
+    #middle = [{'params': p, 'lr': 1e-6} for n, p in model.module.named_parameters() if n[:7] in ['Mixed_5', 'Mixed_6', 'Mixed_7', 'AuxLogi']]
+    #last = [{'params': p, 'lr': 1e-4} for n, p in model.module.named_parameters() if n.startswith('fc')]
     optim_params = first + middle + last
 
 
@@ -574,8 +574,8 @@ if TRAIN:
     for name, param in model.named_parameters():
         param.requires_grad = True 
 
-    criterion = nn.BCEWithLogitsLoss().cuda()
-    #criterion = FocalLoss().cuda()
+    #criterion = nn.BCEWithLogitsLoss().cuda()
+    criterion = FocalLoss().cuda()
     
     optimizer = AdamW(params=optim_params, lr=LEARNING_RATE, weight_decay=1e-5)
     if LOAD_CHECKPOINT:
@@ -671,7 +671,7 @@ def train(dataloaders, model, criterion, optimizer, sigmoid_thresh, n_epochs):
 
             optimizer.zero_grad()
             for i, (X, y) in enumerate(tqdm.tqdm(dataloaders[phase])):
-                accumulation_steps = 16# if phase == 'train' else 8
+                accumulation_steps = 8 # if phase == 'train' else 8
                 batch_weights = torch.Tensor([sum(weights[np.array(sample)]) for sample in test_ds.mlb.inverse_transform(y)])
                 X = X.cuda(non_blocking=True)
                 y = y.cuda(non_blocking=True) if len(y) > 0 else y

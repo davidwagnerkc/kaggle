@@ -59,7 +59,7 @@ HPA_DIR = Path('../input/HPAv18/')
 hpa_df = pd.read_csv('../HPAv18RBGY_wodpl.csv')
 
 #CHECKPOINT_PATH = Path('inceptionv3_512_nog_acc32x4_7norm-best_model-18.pth')
-CHECKPOINT_PATH = Path('submit_final_512batch_halflr-best_model-19')
+CHECKPOINT_PATH = Path('inceptionv3_512_nog_acc32x4_7norm-best_model-18.pth')
 
 LOAD_CHECKPOINT = True 
 
